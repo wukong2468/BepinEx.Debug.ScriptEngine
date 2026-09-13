@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+*.user
+
+# 冒烟测试的运行时产物（每次运行由 tools/run-smoke.ps1 重建）
+tools/McpSmokeTests/fakeroot/
+tools/McpSmokeTests/fakeroot2/
+tools/McpSmokeTests/fakeroot-outside/
+tools/McpSmokeTests/smoke-report.json

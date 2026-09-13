@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net35</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>MissingRef</AssemblyName>
+    <LangVersion>7.3</LangVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="System" />
+    <!-- 编译期需要 Helper.dll；运行测试时故意不部署它（Private=False 防止被复制到输出目录） -->
+    <Reference Include="Helper">
+      <HintPath>..\Helper\bin\$(Configuration)\net35\Helper.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
