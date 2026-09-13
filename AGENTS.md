@@ -40,7 +40,7 @@
 
 ## 4. 改动流程（必须遵守）
 
-1. **改 `ScriptDebugEngine/Mcp/**` 之后必须跑 `tools\run-smoke.ps1`，要求 0 FAIL**（当前基线：123 条用例 110 PASS / 0 FAIL / 13 SKIP）。
+1. **改 `ScriptDebugEngine/Mcp/**` 之后必须跑 `tools\run-smoke.ps1`，要求 0 FAIL**（当前基线：127 条用例 114 PASS / 0 FAIL / 13 SKIP）。
 2. **改了行为就补用例**：优先补离线用例（`tools/McpSmokeTests/Cases/`）；离线覆盖不到的主线程/超时/配置类行为补到实机清单或探针里。
 3. **引擎（`plugins`）改动 → 必须"关游戏 → 覆盖 DLL → 重启游戏"**：运行中的实例会把 DLL 内存映射锁定（覆盖会报 `user-mapped section open`）。脚本 DLL（`scripts`）可以直接覆盖，下一次调用即生效。
 4. **文档与代码同步**：改行为 → 更新 `docs/MCP_DESIGN.md`；改测试 → 更新 `docs/MCP_SMOKE_TEST.md` 与 `MANUAL_L3_L4.md`；改用法/配置 → 更新两份 README。
@@ -88,3 +88,4 @@
 - 在游戏运行中触发长时间阻塞的调用（会让游戏主线程冻结数十秒）。
 - 覆盖/删除游戏目录里的文件；删除 `reference/` 下的任何内容。
 - `git commit` / `push`：本仓库目前**没有任何提交**，提交前先与用户确认。
+- **擅自把 `[Mcp] AllowAnyPath` 默认值改成 `true`**，或在没有用户明确要求时开启它：那会让 `invoke_method` 能加载执行机器上任意 DLL（等于重开任意代码执行面）。它存在的意义是"用户主动打开的逃生开关"，不是默认行为。

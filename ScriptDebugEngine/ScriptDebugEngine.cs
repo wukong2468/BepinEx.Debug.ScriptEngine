@@ -14,6 +14,7 @@ namespace ScriptDebugEngine
         private ConfigEntry<bool> McpEnabled { get; set; }
         private ConfigEntry<int> McpPort { get; set; }
         private ConfigEntry<int> McpTimeoutSeconds { get; set; }
+        private ConfigEntry<bool> McpAllowAnyPath { get; set; }
 
         // 等待在 Unity 主线程上执行的 MCP 调用（net35 没有 ConcurrentQueue，用锁 + Queue 代替）
         private readonly Queue<Action> mainThreadQueue = new Queue<Action>();
@@ -33,6 +34,7 @@ namespace ScriptDebugEngine
             McpEnabled = Config.Bind("Mcp", "Enabled", true, new ConfigDescription("Start the MCP HTTP server that lets an AI agent hot-load a DLL and execute a parameterless public static method."));
             McpPort = Config.Bind("Mcp", "Port", 8765, new ConfigDescription("TCP port for the MCP server. The server only binds to 127.0.0.1."));
             McpTimeoutSeconds = Config.Bind("Mcp", "TimeoutSeconds", 30, new ConfigDescription("How long an MCP request waits for the invocation to finish on the Unity main thread."));
+            McpAllowAnyPath = Config.Bind("Mcp", "AllowAnyPath", false, new ConfigDescription("DANGEROUS: when enabled, invoke_method may load a DLL from ANY path, not just from under the BepInEx root. That turns this tool into arbitrary code execution for any local process. Leave it off unless you really need it."));
 
             ApplyMcpConfiguration();
         }
@@ -41,6 +43,10 @@ namespace ScriptDebugEngine
         {
             // Enabled / Port 允许在运行时修改（ConfigurationManager 或配置文件重载），这里负责启停与换端口
             ApplyMcpConfiguration();
+
+            // AllowAnyPath 也允许运行时改动，而且不需要重启服务器：每次比对前刷新一次上下文
+            if (invokeContext != null)
+                invokeContext.AllowAnyPath = McpAllowAnyPath.Value;
 
             PumpMainThreadQueue();
         }
@@ -80,6 +86,7 @@ namespace ScriptDebugEngine
                 invokeContext = new InvokeContext
                 {
                     BepInExRoot = Paths.BepInExRootPath,
+                    AllowAnyPath = McpAllowAnyPath.Value,
                     LogInfo = message => Logger.Log(LogLevel.Info, message)
                 };
 

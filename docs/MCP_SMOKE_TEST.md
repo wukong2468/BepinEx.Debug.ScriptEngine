@@ -1,6 +1,6 @@
 # ScriptDebugEngine · MCP 服务器冒烟测试方案
 
-- 状态：**已实现并跑通** —— 离线 L1+L2 共 122 条用例：**109 PASS / 0 FAIL / 13 SKIP**，耗时约 26s；13 条实机/集成用例见 `tools/McpSmokeTests/MANUAL_L3_L4.md`
+- 状态：**已实现并跑通** —— 离线 L1+L2 共 127 条用例：**114 PASS / 0 FAIL / 13 SKIP**，耗时约 26s；13 条实机/集成用例见 `tools/McpSmokeTests/MANUAL_L3_L4.md`
 - 被测对象：`ScriptDebugEngine/Mcp/`（TcpListener 极简 HTTP + 自研 JSON + JSON-RPC 分发 + `invoke_method`）与 `ScriptDebugEngine.cs`（主线程泵、启停、配置）
 - 目标：用一批**极端/畸形/边界**输入，验证服务器在各种"不该崩"的情况下**都还活着**，并且失效时给出**明确英文错误**而不是卡死或崩溃
 - 相关文档：`docs/MCP_DESIGN.md`
@@ -168,6 +168,10 @@ tools/
 | D-11 | 路径含空格、`#`、`%`、`&`、`'` | 正确处理（JSON 转义） | B |
 | D-12 | 超长路径（>260 字符） | 不崩，明确错误 | B |
 | D-13 | 空字符串 / 空白 / null | `isError`，明确提示 | B |
+| D-14 | `AllowAnyPath` 默认值 + 越权错误里给出开关提示 | 默认 `false`；越权错误文本含 `AllowAnyPath`（方便排查） | B |
+| D-15 | `AllowAnyPath=true` + 根目录之外的 DLL | 能加载并调用成功；相对路径仍以 BepInEx 根为基准 | B |
+| D-16 | `AllowAnyPath=true` + 不存在的文件 | 仍回 `DLL not found`（存在性检查不是安全校验，两种模式都保留） | B |
+| D-17 | `AllowAnyPath=true` + `\\?\` 前缀 / 越权系统 DLL | 不再出现 `Access denied`（语义确认：白名单与链接检查都被跳过） | B |
 
 ### E. 执行内核（加载 / 反射 / 热重载）
 
@@ -329,6 +333,7 @@ tools/
 14. 孤立代理在 wire 上是 `\uXXXX` 转义：Node/Python 会原样还原该字符；**C# 的 Newtonsoft 读取时会归一化成 U+FFFD**（这是客户端行为，不是服务端丢数据 —— J-04/J-05 因此断言 wire 形式而不是解析结果）。
 15. **手改 `.cfg` 文件不会运行时生效**（BepInEx 5.4 没有配置文件监视器）；只有 ConfigurationManager 勾选或代码调用 `Config.Reload()` 才会让 `ConfigEntry.Value` 变化、从而触发每帧比对逻辑。另：把服务器 `Enabled=false` 之后，**没有远程手段再打开**（调用通道就在这个服务器上），需 ConfigurationManager 或重启游戏。
 16. **引擎 DLL 在游戏运行期间无法替换**（实测：`user-mapped section open`——BepInEx 把它映射进了进程），改引擎必须"关游戏 → 替换 → 再启动"；脚本 DLL（`scripts` 下）不受影响，可随时覆盖。
+17. `[Mcp] AllowAnyPath=true` 时**不做任何路径校验**：`invoke_method` 可以执行机器上任意位置的 DLL（默认 false）。此时"仅回环绑定"是剩下的唯一边界。
 
 ## 7. 后续可做
 

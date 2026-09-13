@@ -17,7 +17,7 @@ Built for and verified on Unity 2022.3.62f2 + BepInEx 5.4.23 Windows, compiled a
 - Wrong method name? The error lists the type's available parameterless static methods — a built-in discovery mechanism instead of extra tools.
 - **Loopback only** (`127.0.0.1`), loopback-bound MCP Streamable HTTP, JSON-RPC 2.0, `/health` endpoint.
 - **No third-party dependencies** in the MCP layer: the HTTP server and the JSON parser are minimal, self-contained implementations (`ScriptDebugEngine/Mcp/` does not reference UnityEngine or BepInEx, which is what makes offline testing possible).
-- Runtime-configurable: `Enabled`, `Port`, `TimeoutSeconds`.
+- Runtime-configurable: `Enabled`, `Port`, `TimeoutSeconds`, `AllowAnyPath`.
 
 ## Requirements
 
@@ -54,8 +54,9 @@ File: `BepInEx\config\com.github.wukong2468.scriptdebugengine.cfg` (named after 
 | `Enabled` | `true` | Start the MCP server |
 | `Port` | `8765` | TCP port (loopback only) |
 | `TimeoutSeconds` | `30` | How long a request waits for the main-thread invocation |
+| `AllowAnyPath` | `false` | **DANGEROUS**: allow `invoke_method` to load a DLL from **any** path, not just from under the BepInEx root. See *Known limitations*. |
 
-Runtime behaviour: the plugin compares the current config against the applied state every frame and stops/starts or rebinds the server when `Enabled`/`Port` change; `TimeoutSeconds` is read per call.
+Runtime behaviour: the plugin compares the current config against the applied state every frame and stops/starts or rebinds the server when `Enabled`/`Port` change; `TimeoutSeconds` and `AllowAnyPath` are read live (toggling `AllowAnyPath` needs no server restart).
 
 **Trigger caveat:** only an actual change of `ConfigEntry.Value` counts — i.e. ConfigurationManager in-game, or code calling `Config.Reload()`. Editing the `.cfg` file by hand has no effect (BepInEx 5.4 has no config-file watcher). Also note that once the server is disabled, there is no remote way to re-enable it (the call channel *is* this server) — use ConfigurationManager or restart the game.
 
@@ -95,7 +96,7 @@ Failure (`isError:true`, text = exception type + message + stack):
 
 | Parameter | Type | Required | Meaning |
 |---|---|---|---|
-| `dllPath` | string | yes | Absolute path, or a path relative to the BepInEx root (e.g. `scripts\MyScript.dll`). Must resolve **under the BepInEx root**. |
+| `dllPath` | string | yes | Absolute path, or a path relative to the BepInEx root (e.g. `scripts\MyScript.dll`). Must resolve **under the BepInEx root** unless `[Mcp] AllowAnyPath` is enabled. |
 | `typeName` | string | yes | Full name, short name, or a dotted suffix (e.g. `MyScript.Commands`, `Commands`, `Commands.Ping`-style suffixes are matched). |
 | `methodName` | string | yes | Name of a **public static method with zero parameters**. |
 
@@ -140,7 +141,7 @@ AI agent ──MCP Streamable HTTP (JSON-RPC 2.0)──▶ ScriptDebugEngine.dll
 
 | Layer | How | Status |
 |---|---|---|
-| Offline (123 cases) | `tools\run-smoke.ps1` — builds the engine + test DLLs, starts an offline host that links `Mcp/*.cs`, runs A–J groups, writes `smoke-report.json` | **110 PASS / 0 FAIL / 13 SKIP**, ~26 s |
+| Offline (127 cases) | `tools\run-smoke.ps1` — builds the engine + test DLLs, starts an offline host that links `Mcp/*.cs`, runs A–J groups, writes `smoke-report.json` | **114 PASS / 0 FAIL / 13 SKIP**, ~26 s |
 | In-game (13 items) | `tools/ProbeDll/` deployed as `BepInEx\scripts\Probe.dll`, driven through a real MCP client | 12 of 13 done (main thread, timeout, busy, retry, hot reload, config, port release, restart reconnect) |
 | Manual checklist | `tools/McpSmokeTests/MANUAL_L3_L4.md` | remaining item: E-17 (deliberate infinite loop / stack overflow — would really hang or kill the game) |
 
@@ -172,3 +173,4 @@ AGENTS.md                   rules for AI collaborators
 8. Each call loads a new assembly copy → repeated calls accumulate memory (restart the game after heavy use).
 9. The whitelist checks the target file itself for reparse points; a *junction/symlink directory* can still point outside the BepInEx root.
 10. `HEAD /mcp` responses include a body (harmless HTTP nit).
+11. The path whitelist can be switched off with `[Mcp] AllowAnyPath` (default `false`). With it enabled, `invoke_method` can load and execute **any DLL on the machine** — arbitrary code execution reachable by any local process, and an AI agent could be talked into it through injected content. The loopback-only binding is then the only remaining boundary. Enable it only when you deliberately need to invoke a DLL outside the BepInEx tree (for example straight from a build output folder).

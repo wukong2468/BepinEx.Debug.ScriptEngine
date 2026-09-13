@@ -1,6 +1,6 @@
 # ScriptDebugEngine · MCP 热加载执行服务 设计文档
 
-- 状态：**已实现、已部署、已验证**（离线 123 条用例 110 PASS / 0 FAIL；实机 13 项完成 12 项，仅 E-17 故意不做）
+- 状态：**已实现、已部署、已验证**（离线 127 条用例 114 PASS / 0 FAIL；实机 13 项完成 12 项，仅 E-17 故意不做）
 - 本版取代此前那版复杂设计：砍掉了参数编组、异步任务、方法列举、日志缓冲、状态字段等一切非必要内容
 - 适用工程：`ScriptDebugEngine/`（程序集 `ScriptDebugEngine`，GUID `com.github.wukong2468.scriptdebugengine`）；产物部署到 `BepInEx\plugins`
 - 目标运行环境：`D:\ProgramPortable\Custom Order Maid\COM3D2_5`（BepInEx 5.4.23，Unity 2022.3.62f2，Windows）
@@ -161,7 +161,7 @@ AI Agent ──MCP Streamable HTTP (JSON-RPC)──▶ ScriptDebugEngine.dll (Be
 | 引擎代码改动 | MCP 自身在 `plugins` 里，**改它必须重启游戏**；脚本 DLL 才是每次调用自动重载 |
 | 依赖 | 不新增任何 NuGet 引用 |
 | 客户端编码要求 | 请求体必须是 **UTF-8** 的 JSON（MCP 客户端都满足）。注意 Windows PowerShell 5.1 的 `Invoke-WebRequest` 会把字符串 body 按 ANSI 发送，含中文的绝对路径会被打乱并报 `Illegal characters in path` —— 手工测试请用 `curl` 或显式传 `[Text.Encoding]::UTF8.GetBytes($json)` |
-| 冒烟测试 | 离线极端场景用例见 `docs/MCP_SMOKE_TEST.md`，一键跑：`tools\run-smoke.ps1`（当前 **123 条用例：110 PASS / 0 FAIL / 13 SKIP**）；实机探针 `tools/ProbeDll/` + 手工清单 `tools/McpSmokeTests/MANUAL_L3_L4.md` |
+| 冒烟测试 | 离线极端场景用例见 `docs/MCP_SMOKE_TEST.md`，一键跑：`tools\run-smoke.ps1`（当前 **127 条用例：114 PASS / 0 FAIL / 13 SKIP**）；实机探针 `tools/ProbeDll/` + 手工清单 `tools/McpSmokeTests/MANUAL_L3_L4.md` |
 
 ---
 
@@ -174,19 +174,22 @@ AI Agent ──MCP Streamable HTTP (JSON-RPC)──▶ ScriptDebugEngine.dll (Be
 | `Enabled` | `true` | 是否启动 MCP 服务器 |
 | `Port` | `8765` | 监听端口（已确认本机空闲） |
 | `TimeoutSeconds` | `30` | 单次调用的等待上限 |
+| `AllowAnyPath` | `false` | **危险开关**：为 `true` 时**不做任何路径校验**，`dllPath` 可以是机器上任意位置（默认关闭）。见 §7 |
 
-其余全部硬编码：只绑 `127.0.0.1`、无 Token、只允许 BepInEx 根目录下的 DLL、只允许 `public static` 无参方法。
+其余全部硬编码：只绑 `127.0.0.1`、无 Token、只允许 `public static` 无参方法。
 
-**这 3 项的运行时生效范围**（重要，实机验证过）：
+**这 4 项的运行时生效范围**（重要，实机验证过）：
 
 - `Enabled` / `Port`：插件每帧把当前配置与"已应用的状态"比对，一旦变化就立刻停掉旧服务器并按新配置启停/换端口；配置没变时不做任何事（启动失败也不会每帧重试，改配置才会再试）
 - `TimeoutSeconds`：每次调用时读取，立即生效
+- `AllowAnyPath`：每帧刷新进 `InvokeContext`，**不需要重启服务器**即生效
 - **触发方式**：只有真正改变 `ConfigEntry.Value` 的操作才算（ConfigurationManager 里勾选 → 用它自己的 Reload；或代码调用 `Config.Reload()`）。**手改 `.cfg` 文件不会生效**（BepInEx 5.4 无配置文件监视器）；`Enabled=false` 之后无法远程再打开，需 ConfigurationManager 或重启
 
-## 7. 安全（两条足够）
+## 7. 安全
 
 1. 只绑回环 `127.0.0.1`，外部无法访问。
-2. `dllPath` 规范化后必须位于 `BepInEx` 根目录之下（即 `scripts`、`plugins` 等），防止被诱导加载系统 DLL。
+2. `dllPath` 规范化后必须位于 `BepInEx` 根目录之下（即 `scripts`、`plugins` 等），防止被诱导加载系统 DLL；相对路径也以该根为基准。
+3. **逃生开关 `[Mcp] AllowAnyPath`（默认 false）**：打开后跳过第 2 条的全部校验（前缀比较 + 符号链接检查），任意路径的 DLL 都能被加载执行 —— 等于把"任意代码执行"面重新打开，只有"仅回环绑定"还在兜底。打开时越权错误里也不再出现 `Access denied`，只保留"文件必须存在"的检查（那不是安全校验，是为了给出明确错误）。用途：需要直接调 BepInEx 目录之外的构建产物。配置项说明里已标 `DANGEROUS`。
 
 ---
 
@@ -217,7 +220,7 @@ AI Agent ──MCP Streamable HTTP (JSON-RPC)──▶ ScriptDebugEngine.dll (Be
 
 ### 9.1 离线验证（`tools\run-smoke.ps1`）
 
-123 条用例 **110 PASS / 0 FAIL / 13 SKIP**，约 26 秒。宿主（net48）直接链接 `ScriptDebugEngine/Mcp/*.cs`，被调用目标是专门构造的测试 DLL（`Good`/`GoodV2`/`Weird`/`Evil`/`MissingRef`/`Helper`）。
+127 条用例 **114 PASS / 0 FAIL / 13 SKIP**，约 26 秒。宿主（net48）直接链接 `ScriptDebugEngine/Mcp/*.cs`，被调用目标是专门构造的测试 DLL（`Good`/`GoodV2`/`Weird`/`Evil`/`MissingRef`/`Helper`）。
 
 - **协议**：`/health`；`initialize`；`notifications/initialized` → 202 空体；`ping`；`tools/list`；错误码 `-32700/-32600/-32601/-32602`
 - **HTTP**：`GET /mcp` 405；畸形/超长头部 400/431；无整体超时防护 → 408；超大正文 413；CL 重复 / CL+TE 400；`Expect: 100-continue`；8 并发；50 个慢速连接下正常请求仍 0ms

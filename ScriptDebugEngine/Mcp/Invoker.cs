@@ -11,8 +11,15 @@ namespace ScriptDebugEngine.Mcp
     /// <summary>调用上下文：白名单根目录、引用解析目录、日志回调。</summary>
     internal sealed class InvokeContext
     {
-        /// <summary>BepInEx 根目录：相对路径的基准，同时限定可加载的 DLL 范围。</summary>
+        /// <summary>BepInEx 根目录：相对路径的基准；默认也是允许加载的 DLL 范围。</summary>
         public string BepInExRoot;
+
+        /// <summary>
+        /// 为 true 时**不做任何范围校验**：允许加载任意路径的 DLL（默认 false）。
+        /// 打开后 <c>dllPath</c> 可以指向机器上任何位置，等于把"任意代码执行"面重新打开，仅在你明确需要时开启。
+        /// 注意：路径解析（相对路径仍以 BepInEx 根为基准）与"文件必须存在"的检查仍然保留。
+        /// </summary>
+        public bool AllowAnyPath;
 
         /// <summary>可选的日志回调（可为 null）。</summary>
         public Action<string> LogInfo;
@@ -55,20 +62,34 @@ namespace ScriptDebugEngine.Mcp
             string root = Path.GetFullPath(context.BepInExRoot);
             string fullPath = Path.GetFullPath(Path.IsPathRooted(dllPath) ? dllPath : Path.Combine(root, dllPath));
 
-            string rootWithSeparator = root.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
-                ? root
-                : root + Path.DirectorySeparatorChar;
-            if (!fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
-                throw new UnauthorizedAccessException(string.Format("Access denied: '{0}' is outside of '{1}'.", fullPath, root));
+            // AllowAnyPath 打开时跳过全部范围校验（默认关闭）
+            bool restricted = !context.AllowAnyPath;
 
+            if (restricted && !IsUnderRoot(fullPath, root))
+                throw new UnauthorizedAccessException(string.Format(
+                    "Access denied: '{0}' is outside of '{1}'. (Enable the [Mcp] AllowAnyPath option to load DLLs from other locations.)", fullPath, root));
+
+            // 文件是否存在不是安全校验，而是为了给出明确的错误信息；两种模式下都保留
             if (!File.Exists(fullPath)) throw new FileNotFoundException("DLL not found: " + fullPath, fullPath);
 
             // 拒绝符号链接/junction：Path.GetFullPath 不解析链接，否则可以拿一个链接指向白名单之外来绕过限制
-            FileAttributes attributes = File.GetAttributes(fullPath);
-            if ((attributes & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint)
+            if (restricted && IsReparsePoint(fullPath))
                 throw new UnauthorizedAccessException(string.Format("Access denied: '{0}' is a symbolic link or junction.", fullPath));
 
             return fullPath;
+        }
+
+        private static bool IsUnderRoot(string fullPath, string root)
+        {
+            string rootWithSeparator = root.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
+                ? root
+                : root + Path.DirectorySeparatorChar;
+            return fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsReparsePoint(string fullPath)
+        {
+            return (File.GetAttributes(fullPath) & FileAttributes.ReparsePoint) == FileAttributes.ReparsePoint;
         }
 
         private static Type FindType(IEnumerable<Type> types, string typeName)

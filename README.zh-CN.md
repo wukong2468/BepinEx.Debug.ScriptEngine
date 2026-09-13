@@ -17,7 +17,7 @@
 - **方法名写错也没关系**：错误信息会列出该类型所有可用的无参静态方法（内置的"发现"机制，因此不需要额外的列函数工具）
 - 只绑回环 `127.0.0.1`；MCP Streamable HTTP + JSON-RPC 2.0；另有 `GET /health`
 - MCP 层（`ScriptDebugEngine/Mcp/`）**零第三方依赖**：HTTP 服务器与 JSON 解析器都是自研精简实现；这一层刻意不引用 UnityEngine / BepInEx，因此可以脱离游戏做离线测试
-- 三个配置项支持运行时调整：`Enabled`、`Port`、`TimeoutSeconds`
+- 四个配置项支持运行时调整：`Enabled`、`Port`、`TimeoutSeconds`、`AllowAnyPath`
 
 ## 环境要求
 
@@ -54,8 +54,9 @@ dotnet build ScriptDebugEngine\ScriptDebugEngine.csproj -c Release
 | `Enabled` | `true` | 是否启动 MCP 服务器 |
 | `Port` | `8765` | 监听端口（仅回环） |
 | `TimeoutSeconds` | `30` | 单次请求等待主线程执行的上限 |
+| `AllowAnyPath` | `false` | **危险**：允许 `invoke_method` 从**任意路径**加载 DLL，而不限于 BepInEx 根目录之下。详见"已知限制" |
 
-运行时行为：插件每帧把当前配置与"已应用状态"比对，`Enabled`/`Port` 一变就立刻停旧起新/换端口；`TimeoutSeconds` 每次调用时读取。
+运行时行为：插件每帧把当前配置与"已应用状态"比对，`Enabled`/`Port` 一变就立刻停旧起新/换端口；`TimeoutSeconds` 与 `AllowAnyPath` 都是实时读取（切换 `AllowAnyPath` 不需要重启服务器）。
 
 **触发方式（重要）**：只有真正改变 `ConfigEntry.Value` 的操作才算——即游戏内 ConfigurationManager 勾选/输入，或代码调用 `Config.Reload()`。**手改 `.cfg` 文件不会生效**（BepInEx 5.4 没有配置文件监视器）。另外：一旦把服务器 `Enabled=false`，就**没有远程手段再打开**（调用通道本身就是这个服务器），需要用 ConfigurationManager 或重启游戏。
 
@@ -95,7 +96,7 @@ curl.exe -s -X POST http://127.0.0.1:8765/mcp -H "Content-Type: application/json
 
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `dllPath` | string | 是 | 绝对路径，或相对 BepInEx 根目录的路径（如 `scripts\MyScript.dll`）。解析后**必须位于 BepInEx 根目录之下** |
+| `dllPath` | string | 是 | 绝对路径，或相对 BepInEx 根目录的路径（如 `scripts\MyScript.dll`）。解析后**必须位于 BepInEx 根目录之下**（除非打开了 `[Mcp] AllowAnyPath`） |
 | `typeName` | string | 是 | 类型全名、短名或点号后缀（如 `MyScript.Commands`、`Commands`） |
 | `methodName` | string | 是 | **public static 且无参数**的方法名 |
 
@@ -140,7 +141,7 @@ AI agent ──MCP Streamable HTTP (JSON-RPC 2.0)──▶ ScriptDebugEngine.dll
 
 | 层次 | 怎么跑 | 状态 |
 |---|---|---|
-| 离线（123 条用例） | `tools\run-smoke.ps1`：构建引擎与测试 DLL、起离线宿主（链接 `Mcp/*.cs`）、跑 A–J 组、生成 `smoke-report.json` | **110 PASS / 0 FAIL / 13 SKIP**，约 26 秒 |
+| 离线（127 条用例） | `tools\run-smoke.ps1`：构建引擎与测试 DLL、起离线宿主（链接 `Mcp/*.cs`）、跑 A–J 组、生成 `smoke-report.json` | **114 PASS / 0 FAIL / 13 SKIP**，约 26 秒 |
 | 实机（13 项） | 把 `tools/ProbeDll/` 部署成 `BepInEx\scripts\Probe.dll`，用真实 MCP 客户端驱动 | 已完成 12 项（主线程、超时、busy、重试、热重载、动态配置、端口释放、重启重连） |
 | 手工清单 | `tools/McpSmokeTests/MANUAL_L3_L4.md` | 剩 1 项：E-17（故意让目标函数死循环/爆栈——会真的卡死或崩溃游戏） |
 
@@ -172,3 +173,4 @@ AGENTS.md                    AI 协作规则
 8. 每次调用都会加载新程序集副本 → 反复调用会累积内存（用得多了重启一次游戏）。
 9. 白名单只检查目标文件本身是否为符号链接；**中间目录是 junction/符号链接时仍可指向根目录之外**。
 10. `HEAD /mcp` 的响应会带 body（无害的 HTTP 小瑕疵）。
+11. 路径白名单可以通过 `[Mcp] AllowAnyPath` 关掉（默认 `false`）。开启后 `invoke_method` 能加载并执行**机器上任意 DLL**——本机任何进程都能借此获得任意代码执行能力，AI agent 也可能被注入内容诱导去做这件事；此时"仅回环绑定"是剩下的唯一边界。只有当你确实需要调用 BepInEx 目录之外的 DLL（例如直接调构建产物）时才打开它。

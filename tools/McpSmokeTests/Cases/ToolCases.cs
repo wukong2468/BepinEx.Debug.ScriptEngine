@@ -139,6 +139,78 @@ namespace McpSmokeTests
                 const string json = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"invoke_method\",\"arguments\":{\"dllPath\":null,\"typeName\":\"T\",\"methodName\":\"M\"}}}";
                 runner.Check(Runner.IsError(runner.Rpc(json)), "null dllPath 应 isError");
             });
+
+            runner.Case("D-14", "AllowAnyPath 默认必须为 false，且越权提示要给出开关提示", () =>
+            {
+                var fresh = new ScriptDebugEngine.Mcp.InvokeContext();
+                runner.Check(!fresh.AllowAnyPath, "InvokeContext.AllowAnyPath 的默认值必须是 false");
+                runner.Check(!runner.Env.Context.AllowAnyPath, "运行中的上下文默认也必须是 false");
+
+                string response = runner.Invoke("C:\\Windows\\System32\\advapi32.dll", "X", "Y");
+                runner.Check(Runner.IsError(response), "默认应拒绝越权路径: " + Runner.ResultJson(response));
+                runner.ExpectContains("提示可开开关", Runner.Text(response), "AllowAnyPath");
+            });
+
+            runner.Case("D-15", "AllowAnyPath=true：允许加载 BepInEx 根目录之外的 DLL", () =>
+            {
+                // fakeroot-outside 是驱动脚本准备的"根目录之外"的目录（含一份 Good.dll）
+                string outside = Path.GetFullPath(Path.Combine(runner.Env.Root, "..", Path.GetFileName(runner.Env.Root) + "-outside", "Good.dll"));
+                try
+                {
+                    runner.Env.Context.AllowAnyPath = true;
+
+                    string response = runner.Invoke(outside, "Good.Probe", "Ping");
+                    runner.Check(!Runner.IsError(response), "开启后应能加载根外 DLL: " + Runner.ResultJson(response));
+                    runner.Expect("根外 DLL 的返回值", Runner.Text(response), "pong");
+
+                    // 相对路径依旧以 BepInEx 根目录为基准（这不是安全校验）
+                    runner.Expect("相对路径基准不变", Runner.Text(runner.Invoke("scripts\\Good.dll", "Good.Probe", "Ping")), "pong");
+                }
+                finally
+                {
+                    runner.Env.Context.AllowAnyPath = false;
+                }
+            });
+
+            runner.Case("D-16", "AllowAnyPath=true：仍保留“文件必须存在”的检查", () =>
+            {
+                try
+                {
+                    runner.Env.Context.AllowAnyPath = true;
+                    string response = runner.Invoke("C:\\definitely\\not\\here\\Nope.dll", "X", "Y");
+                    runner.Check(Runner.IsError(response), "不存在的文件应仍报错: " + Runner.ResultJson(response));
+                    runner.ExpectContains("明确提示", Runner.Text(response), "DLL not found");
+                }
+                finally
+                {
+                    runner.Env.Context.AllowAnyPath = false;
+                }
+            });
+
+            runner.Case("D-17", "AllowAnyPath=true：白名单与链接检查都不再生效（语义确认）", () =>
+            {
+                string absolute = Path.Combine(scripts, "Good.dll");
+                try
+                {
+                    runner.Env.Context.AllowAnyPath = true;
+
+                    // \\?\ 长路径前缀在受限模式下会被 fail-closed 拒绝（D-08），开启后应当可用
+                    string response = runner.Invoke("\\\\?\\" + absolute, "Good.Probe", "Ping");
+                    runner.Expect("\\\\?\\ 前缀不再被拦", Runner.Text(response), "pong");
+
+                    // 越权路径也不再有前缀检查（这里指向一个真实存在的系统 DLL，会走到"解析失败"而不是"越权拒绝"）
+                    string system = runner.Invoke("C:\\Windows\\System32\\advapi32.dll", "X", "Y");
+                    runner.Check(Runner.IsError(system), "原生 DLL 仍会失败（只是原因不同）: " + Runner.ResultJson(system));
+                    runner.Check(Runner.Text(system) != null && Runner.Text(system).IndexOf("Access denied", StringComparison.Ordinal) < 0,
+                        "开启后不应再出现 Access denied，实际: " + Runner.Text(system));
+                }
+                finally
+                {
+                    runner.Env.Context.AllowAnyPath = false;
+                }
+
+                runner.Check(!runner.Env.Context.AllowAnyPath, "用例结束必须把开关还原为 false，避免影响后续用例");
+            });
         }
 
         private static string FirstLine(string text)
