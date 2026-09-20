@@ -45,7 +45,17 @@ namespace ScriptDebugEngine.Mcp
         private const string DefaultProtocolVersion = "2025-03-26";
         private const string InvokeMethodToolName = "invoke_method";
 
-        private static readonly string[] SupportedProtocolVersions = { "2024-11-05", "2025-03-26", "2025-06-18" };
+        /// <summary>
+        /// 只声明真正支持的协议版本。2024-11-05 走的是旧的 HTTP+SSE 传输（GET 打开 SSE 流），
+        /// 与本服务器的 Streamable HTTP 端点不兼容，故不再声明 —— 否则属于误导性协商。
+        /// </summary>
+        private static readonly string[] SupportedProtocolVersions = { "2025-03-26", "2025-06-18" };
+
+        /// <summary>
+        /// DNS rebinding 防护允许的 Origin 主机名。浏览器发起的请求一定带 Origin，
+        /// 且必须是回环来源；非浏览器的 MCP 客户端不发 Origin（缺席视为放行）。
+        /// </summary>
+        private static readonly string[] AllowedOriginHosts = { "127.0.0.1", "localhost", "::1", "[::1]" };
 
         private readonly int port;
         private readonly string serverVersion;
@@ -220,6 +230,15 @@ namespace ScriptDebugEngine.Mcp
                     return;
                 }
 
+                // 规范要求服务端必须校验 Origin：仅绑回环挡不住 DNS rebinding
+                // （恶意网页把自己的域名解析到 127.0.0.1，浏览器就会带上它自己的 Origin 来访问本机服务）
+                string origin;
+                if (headers.TryGetValue("Origin", out origin) && !IsAllowedOrigin(origin))
+                {
+                    WriteText(stream, 403, "Forbidden", "Cross-origin requests are not allowed.");
+                    return;
+                }
+
                 // 部分客户端（例如 .NET 的 HttpWebRequest）会先声明 Expect: 100-continue 并等应答，必须先回 100 再读正文
                 string expect;
                 if (headers.TryGetValue("Expect", out expect) && expect.IndexOf("100-continue", StringComparison.OrdinalIgnoreCase) >= 0)
@@ -251,9 +270,30 @@ namespace ScriptDebugEngine.Mcp
                     return;
                 }
 
+                if (string.Equals(httpMethod, "DELETE", StringComparison.OrdinalIgnoreCase))
+                {
+                    // 本服务器不做协议级 session，规范允许用 405 表示"不允许客户端主动终止 session"
+                    if (string.Equals(path, "/mcp", StringComparison.Ordinal))
+                        WriteText(stream, 405, "Method Not Allowed", "This server has no protocol sessions, so DELETE is not allowed.");
+                    else
+                        WriteText(stream, 404, "Not Found", "Not found.");
+                    return;
+                }
+
                 if (!string.Equals(httpMethod, "POST", StringComparison.OrdinalIgnoreCase) || !string.Equals(path, "/mcp", StringComparison.Ordinal))
                 {
                     WriteText(stream, 404, "Not Found", "Not found.");
+                    return;
+                }
+
+                // MCP-Protocol-Version：2025-06-18 起客户端必须携带，服务器收到不支持/无效的版本必须回 400。
+                // 缺头时不报错（按 2025-03-26 兼容处理），这样只有真正声明了不支持版本的客户端才会被拒。
+                string declaredVersion;
+                if (headers.TryGetValue("MCP-Protocol-Version", out declaredVersion)
+                    && Array.IndexOf(SupportedProtocolVersions, declaredVersion) < 0)
+                {
+                    WriteText(stream, 400, "Bad Request", "Unsupported MCP-Protocol-Version: " + declaredVersion
+                        + ". Supported versions: " + string.Join(", ", SupportedProtocolVersions) + ".");
                     return;
                 }
 
@@ -469,6 +509,7 @@ namespace ScriptDebugEngine.Mcp
                 case 200: return "OK";
                 case 202: return "Accepted";
                 case 400: return "Bad Request";
+                case 403: return "Forbidden";
                 case 404: return "Not Found";
                 case 405: return "Method Not Allowed";
                 case 408: return "Request Timeout";
@@ -477,6 +518,30 @@ namespace ScriptDebugEngine.Mcp
                 case 431: return "Request Header Fields Too Large";
                 default: return "OK";
             }
+        }
+
+        /// <summary>
+        /// 判断 Origin 头是否来自本机回环。缺席（null/空）视为放行：非浏览器的 MCP 客户端本来就不发这个头。
+        /// "null" 这个字面量（file:// 或沙箱 iframe 的来源）**不放行** —— 沙箱同样能被攻击者利用。
+        /// </summary>
+        private static bool IsAllowedOrigin(string origin)
+        {
+            if (string.IsNullOrEmpty(origin)) return true;
+
+            int schemeSeparator = origin.IndexOf("://", StringComparison.Ordinal);
+            if (schemeSeparator < 0) return false;
+
+            string host = origin.Substring(schemeSeparator + 3);
+            int pathStart = host.IndexOf('/');
+            if (pathStart >= 0) host = host.Substring(0, pathStart);
+
+            // 去掉端口：IPv6 字面量形如 [::1]:8765，要找最后一个 ']' 之后的冒号
+            int bracket = host.LastIndexOf(']');
+            int colon = host.LastIndexOf(':');
+            if (colon > bracket) host = host.Substring(0, colon);
+
+            host = host.Trim();
+            return Array.IndexOf(AllowedOriginHosts, host.ToLowerInvariant()) >= 0;
         }
 
         // ---------------- JSON-RPC ----------------
@@ -512,7 +577,18 @@ namespace ScriptDebugEngine.Mcp
                 }
 
                 string method = Json.GetString(request, "method");
-                if (string.IsNullOrEmpty(method)) return ErrorResponse(id, -32600, "Invalid Request: 'method' is required.");
+                if (string.IsNullOrEmpty(method))
+                {
+                    // 没有 method 却带 result/error：这是一条 JSON-RPC **响应**。本服务器从不向客户端发起请求，
+                    // 因此无法接受响应 —— 规范要求这类输入回 HTTP 错误状态码，而不是 200。
+                    if (request.ContainsKey("result") || request.ContainsKey("error"))
+                    {
+                        statusCode = 400;
+                        return ErrorResponse(id, -32600, "Invalid Request: this endpoint only accepts JSON-RPC requests and notifications.");
+                    }
+
+                    return ErrorResponse(id, -32600, "Invalid Request: 'method' is required.");
+                }
 
                 switch (method)
                 {

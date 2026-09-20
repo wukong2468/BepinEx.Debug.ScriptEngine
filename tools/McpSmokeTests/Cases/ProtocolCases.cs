@@ -13,13 +13,16 @@ namespace McpSmokeTests
 
             runner.Case("C-01", "initialize 已知协议版本回显", () =>
             {
-                foreach (string version in new[] { "2024-11-05", "2025-03-26", "2025-06-18" })
+                foreach (string version in new[] { "2025-03-26", "2025-06-18" })
                 {
                     string response = runner.Rpc(Initialize(1, version));
                     runner.Expect("回显 " + version, ResultString(response, "protocolVersion"), version);
                     runner.Check(ResultObject(response, "capabilities") != null, "应带 capabilities: " + Runner.ResultJson(response));
                     runner.Check(ResultObject(response, "serverInfo") != null, "应带 serverInfo: " + Runner.ResultJson(response));
                 }
+
+                // 2024-11-05 走旧的 HTTP+SSE 传输，本服务器不声明支持 → 协商回退到默认版本（不再误导性回显旧版本）
+                runner.Expect("回显 2024-11-05 时回退", ResultString(runner.Rpc(Initialize(2, "2024-11-05")), "protocolVersion"), "2025-03-26");
             });
 
             runner.Case("C-02", "initialize 未知版本 / 缺 params / 空 params", () =>
@@ -165,6 +168,83 @@ namespace McpSmokeTests
             {
                 runner.ExpectStatus("GET /nope", RawClient.Get(port, "/nope"), 404);
                 runner.ExpectStatus("POST /nope", RawClient.SendText(port, RawPost(string.Empty, "{}", "/nope"), 8000), 404);
+            });
+
+            const string ping = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}";
+
+            runner.Case("C-21", "无 Origin 头 → 放行（非浏览器 MCP 客户端）", () =>
+            {
+                runner.ExpectStatus("无 Origin", RawClient.Post(port, ping), 200);
+            });
+
+            runner.Case("C-22", "回环 Origin → 放行", () =>
+            {
+                foreach (string origin in new[]
+                {
+                    "http://127.0.0.1:8765", "http://127.0.0.1", "https://localhost:8765",
+                    "http://localhost", "http://[::1]:8765"
+                })
+                {
+                    string response = RawClient.SendText(port, RawPost("Origin: " + origin + "\r\n", ping), 8000);
+                    runner.ExpectStatus("Origin=" + origin, response, 200);
+                }
+            });
+
+            runner.Case("C-23", "非回环 Origin → 403（DNS rebinding 防护）", () =>
+            {
+                foreach (string origin in new[] { "http://evil.example:8765", "null", "file://", "http://127.0.0.1.evil.com" })
+                {
+                    string response = RawClient.SendText(port, RawPost("Origin: " + origin + "\r\n", ping), 8000);
+                    runner.ExpectStatus("Origin=" + origin, response, 403);
+                }
+
+                // 该防护覆盖所有路径（含 /health），避免任何回环资产被跨源读取
+                string health = RawClient.SendText(port,
+                    "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://evil.example\r\nConnection: close\r\n\r\n", 8000);
+                runner.ExpectStatus("GET /health 跨源", health, 403);
+            });
+
+            runner.Case("C-24", "MCP-Protocol-Version 受支持版本 → 正常", () =>
+            {
+                foreach (string version in new[] { "2025-03-26", "2025-06-18" })
+                {
+                    string response = RawClient.SendText(port, RawPost("MCP-Protocol-Version: " + version + "\r\n", ping), 8000);
+                    runner.ExpectStatus("version=" + version, response, 200);
+                }
+
+                // 缺头 → 按 2025-03-26 兼容处理，不报错（规范 SHOULD 的回退语义）
+                runner.ExpectStatus("缺头", RawClient.Post(port, ping), 200);
+            });
+
+            runner.Case("C-25", "MCP-Protocol-Version 不支持版本 → 400", () =>
+            {
+                foreach (string version in new[] { "1999-01-01", "2024-11-05", "2026-07-28", "garbage" })
+                {
+                    string response = RawClient.SendText(port, RawPost("MCP-Protocol-Version: " + version + "\r\n", ping), 8000);
+                    runner.ExpectStatus("version=" + version, response, 400);
+                }
+            });
+
+            runner.Case("C-26", "DELETE /mcp → 405，未知路径 DELETE → 404", () =>
+            {
+                string response = RawClient.SendText(port, "DELETE /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", 8000);
+                runner.ExpectStatus("DELETE /mcp", response, 405);
+                runner.ExpectStatus("DELETE /nope",
+                    RawClient.SendText(port, "DELETE /nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", 8000), 404);
+            });
+
+            runner.Case("C-27", "POST 携带 JSON-RPC 响应（带 result/error 无 method）→ 400", () =>
+            {
+                string withResult = RawClient.Post(port, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
+                runner.ExpectStatus("带 result", withResult, 400);
+                runner.Check(Runner.ErrorCode(withResult) == -32600, "应回 -32600，实际: " + Runner.ResultJson(withResult));
+
+                string withError = RawClient.Post(port, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"x\"}}");
+                runner.ExpectStatus("带 error", withError, 400);
+
+                // 既没有 method 也没有 result/error：仍按普通"非法请求"处理（HTTP 200 + -32600），保持既有行为
+                runner.ExpectStatus("两者都没有",
+                    RawClient.Post(port, "{\"jsonrpc\":\"2.0\",\"id\":1}"), 200);
             });
         }
 

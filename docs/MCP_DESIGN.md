@@ -1,6 +1,6 @@
 # ScriptDebugEngine · MCP 热加载执行服务 设计文档
 
-- 状态：**已实现、已部署、已验证**（离线 127 条用例 114 PASS / 0 FAIL；实机 13 项完成 12 项，仅 E-17 故意不做）
+- 状态：**已实现、已部署、已验证**（离线 134 条用例 121 PASS / 0 FAIL；实机 13 项完成 12 项，仅 E-17 故意不做）
 - 本版取代此前那版复杂设计：砍掉了参数编组、异步任务、方法列举、日志缓冲、状态字段等一切非必要内容
 - 适用工程：`ScriptDebugEngine/`（程序集 `ScriptDebugEngine`，GUID `com.github.wukong2468.scriptdebugengine`）；产物部署到 `BepInEx\plugins`
 - 目标运行环境：`D:\ProgramPortable\Custom Order Maid\COM3D2_5`（BepInEx 5.4.23，Unity 2022.3.62f2，Windows）
@@ -144,6 +144,10 @@ AI Agent ──MCP Streamable HTTP (JSON-RPC)──▶ ScriptDebugEngine.dll (Be
 |---|---|
 | HTTP 实现 | 自研 `TcpListener`（`127.0.0.1`）+ 极简 HTTP/1.1：读头部到 `\r\n\r\n` → 按 `Content-Length` 读体 → 处理 → 回 `Content-Length` + `Connection: close` 后关连接 |
 | 读请求限时 | 头部 5 s / 正文 10 s / 超限正文丢弃 2 s，**每次 Read 前按剩余时限设 `ReceiveTimeout`**；超时分别回 `408`，头部超 8 KB 回 `431`，请求行畸形回 `400`（畸形客户端不再被静默断连） |
+| **`Origin` 校验（规范 MUST）** | `IsAllowedOrigin`：`Origin` **缺席放行**（非浏览器 MCP 客户端本来就不带）；一旦出现，主机名必须是 `127.0.0.1` / `localhost` / `::1`，否则回 `403`。`Origin: null`（`file://`、沙箱 iframe）与 `file://` 一律拒 —— 沙箱同样能被攻击者利用。这是 DNS rebinding 防护：仅绑回环挡不住"恶意网页把自己的域名解析到 127.0.0.1"。校验对所有路径生效（含 `/health`） |
+| **`MCP-Protocol-Version` 校验（2025-06-18 起 MUST）** | 读取该头；不在 `SupportedProtocolVersions`（`2025-03-26` / `2025-06-18`）内 → `400`，错误文本列出受支持版本。**缺头不报错**（按 2025-03-26 兼容处理）。`2024-11-05` 已从支持列表移除：它走旧的 HTTP+SSE 传输（GET 打开 SSE），与本 Streamable HTTP 端不兼容，声明支持属于误导性协商 |
+| HTTP 方法边界 | `GET /mcp` → `405`；**`DELETE /mcp` → `405`**（本服务器无协议级 session，规范允许以此表示"不允许客户端主动终止 session"）；其余方法/路径 → `404` |
+| JSON-RPC 响应输入 | 无 `method` 但带 `result`/`error` 的报文被识别为 JSON-RPC **响应**：本服务器从不向客户端发起请求，无法接受它 → 回 **HTTP `400`** + `-32600`（规范要求此类输入用 HTTP 错误状态码，而不是 200）。既无 `method` 也无 `result`/`error` 的仍按"非法请求"回 `200` + `-32600` |
 | **坑：`Expect: 100-continue`** | 收到该头必须先回 `HTTP/1.1 100 Continue\r\n\r\n` 再读体，否则部分 .NET 客户端会延迟/卡住（已实现，PowerShell 5.1 实测走的就是这条路径） |
 | `Transfer-Encoding: chunked` | 不支持，回 `411 Length Required`；与 `Content-Length` 并存、或 `Content-Length` 重复，都回 `400` |
 | 请求体上限 | 64 KB；超限时**先把正文丢弃读完再回 `413`**，否则客户端可能因连接被重置而看不到这个错误 |
@@ -161,7 +165,7 @@ AI Agent ──MCP Streamable HTTP (JSON-RPC)──▶ ScriptDebugEngine.dll (Be
 | 引擎代码改动 | MCP 自身在 `plugins` 里，**改它必须重启游戏**；脚本 DLL 才是每次调用自动重载 |
 | 依赖 | 不新增任何 NuGet 引用 |
 | 客户端编码要求 | 请求体必须是 **UTF-8** 的 JSON（MCP 客户端都满足）。注意 Windows PowerShell 5.1 的 `Invoke-WebRequest` 会把字符串 body 按 ANSI 发送，含中文的绝对路径会被打乱并报 `Illegal characters in path` —— 手工测试请用 `curl` 或显式传 `[Text.Encoding]::UTF8.GetBytes($json)` |
-| 冒烟测试 | 离线极端场景用例见 `docs/MCP_SMOKE_TEST.md`，一键跑：`tools\run-smoke.ps1`（当前 **127 条用例：114 PASS / 0 FAIL / 13 SKIP**）；实机探针 `tools/ProbeDll/` + 手工清单 `tools/McpSmokeTests/MANUAL_L3_L4.md` |
+| 冒烟测试 | 离线极端场景用例见 `docs/MCP_SMOKE_TEST.md`，一键跑：`tools\run-smoke.ps1`（当前 **134 条用例：121 PASS / 0 FAIL / 13 SKIP**）；实机探针 `tools/ProbeDll/` + 手工清单 `tools/McpSmokeTests/MANUAL_L3_L4.md` |
 
 ---
 
@@ -187,9 +191,10 @@ AI Agent ──MCP Streamable HTTP (JSON-RPC)──▶ ScriptDebugEngine.dll (Be
 
 ## 7. 安全
 
-1. 只绑回环 `127.0.0.1`，外部无法访问。
-2. `dllPath` 规范化后必须位于 `BepInEx` 根目录之下（即 `scripts`、`plugins` 等），防止被诱导加载系统 DLL；相对路径也以该根为基准。
-3. **逃生开关 `[Mcp] AllowAnyPath`（默认 false）**：打开后跳过第 2 条的全部校验（前缀比较 + 符号链接检查），任意路径的 DLL 都能被加载执行 —— 等于把"任意代码执行"面重新打开，只有"仅回环绑定"还在兜底。打开时越权错误里也不再出现 `Access denied`，只保留"文件必须存在"的检查（那不是安全校验，是为了给出明确错误）。用途：需要直接调 BepInEx 目录之外的构建产物。配置项说明里已标 `DANGEROUS`。
+1. 只绑回环 `127.0.0.1`，外部网络无法访问。
+2. **`Origin` 校验（DNS rebinding 防护，规范 MUST）**：`Origin` 缺席放行（非浏览器 MCP 客户端不带）；一旦出现，主机名必须是 `127.0.0.1` / `localhost` / `::1`，否则回 `403`；`Origin: null` 与 `file://` 一律拒。**没有这一条，只绑回环是不够的** —— 浏览器里的恶意网页可以把自己的域名解析到 `127.0.0.1`，从而跨源驱动 `invoke_method` 加载执行 DLL。
+3. `dllPath` 规范化后必须位于 `BepInEx` 根目录之下（即 `scripts`、`plugins` 等），防止被诱导加载系统 DLL；相对路径也以该根为基准。
+4. **逃生开关 `[Mcp] AllowAnyPath`（默认 false）**：打开后跳过第 3 条的全部校验（前缀比较 + 符号链接检查），任意路径的 DLL 都能被加载执行 —— 等于把"任意代码执行"面重新打开，此时只剩"仅回环绑定 + Origin 校验"兜底。打开时越权错误里也不再出现 `Access denied`，只保留"文件必须存在"的检查（那不是安全校验，是为了给出明确错误）。用途：需要直接调 BepInEx 目录之外的构建产物。配置项说明里已标 `DANGEROUS`。
 
 ---
 
@@ -220,9 +225,10 @@ AI Agent ──MCP Streamable HTTP (JSON-RPC)──▶ ScriptDebugEngine.dll (Be
 
 ### 9.1 离线验证（`tools\run-smoke.ps1`）
 
-127 条用例 **114 PASS / 0 FAIL / 13 SKIP**，约 26 秒。宿主（net48）直接链接 `ScriptDebugEngine/Mcp/*.cs`，被调用目标是专门构造的测试 DLL（`Good`/`GoodV2`/`Weird`/`Evil`/`MissingRef`/`Helper`）。
+134 条用例 **121 PASS / 0 FAIL / 13 SKIP**，约 26 秒。宿主（net48）直接链接 `ScriptDebugEngine/Mcp/*.cs`，被调用目标是专门构造的测试 DLL（`Good`/`GoodV2`/`Weird`/`Evil`/`MissingRef`/`Helper`）。
 
 - **协议**：`/health`；`initialize`；`notifications/initialized` → 202 空体；`ping`；`tools/list`；错误码 `-32700/-32600/-32601/-32602`
+- **传输安全与版本协商（C-21~C-27）**：`Origin` 缺席/回环放行、非回环与 `null`/`file://` → `403`（含 `/health`）；`MCP-Protocol-Version` 支持版本放行、不支持 → `400`、缺头兼容；`DELETE /mcp` → `405`；POST 携带 JSON-RPC 响应 → `400`
 - **HTTP**：`GET /mcp` 405；畸形/超长头部 400/431；无整体超时防护 → 408；超大正文 413；CL 重复 / CL+TE 400；`Expect: 100-continue`；8 并发；50 个慢速连接下正常请求仍 0ms
 - **执行**：相对/绝对/后缀类型名/多类型；`string`/`int`/`void`/`null`；异常文本；带参方法与方法名错误的候选列表；泛型方法不误命中
 - **安全**：越权路径/`..` 穿越/同前缀兄弟目录/UNC/`\\?\`/符号链接全部被拒

@@ -40,7 +40,7 @@
 
 ## 4. 改动流程（必须遵守）
 
-1. **改 `ScriptDebugEngine/Mcp/**` 之后必须跑 `tools\run-smoke.ps1`，要求 0 FAIL**（当前基线：127 条用例 114 PASS / 0 FAIL / 13 SKIP）。
+1. **改 `ScriptDebugEngine/Mcp/**` 之后必须跑 `tools\run-smoke.ps1`，要求 0 FAIL**（当前基线：134 条用例 121 PASS / 0 FAIL / 13 SKIP）。
 2. **改了行为就补用例**：优先补离线用例（`tools/McpSmokeTests/Cases/`）；离线覆盖不到的主线程/超时/配置类行为补到实机清单或探针里。
 3. **引擎（`plugins`）改动 → 必须"关游戏 → 覆盖 DLL → 重启游戏"**：运行中的实例会把 DLL 内存映射锁定（覆盖会报 `user-mapped section open`）。脚本 DLL（`scripts`）可以直接覆盖，下一次调用即生效。
 4. **文档与代码同步**：改行为 → 更新 `docs/MCP_DESIGN.md`；改测试 → 更新 `docs/MCP_SMOKE_TEST.md` 与 `MANUAL_L3_L4.md`；改用法/配置 → 更新两份 README。

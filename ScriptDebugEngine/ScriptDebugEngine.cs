@@ -173,8 +173,7 @@ namespace ScriptDebugEngine
                             lock (gate)
                             {
                                 finished = true;
-                                // 必须写全名：游戏的 Assembly-CSharp 里有一个全局命名空间的 Monitor 类型，会遮蔽 System.Threading.Monitor
-                                System.Threading.Monitor.Pulse(gate);
+                                Monitor.Pulse(gate);
                             }
                         }
                     });
@@ -184,7 +183,7 @@ namespace ScriptDebugEngine
                     {
                         while (!finished)
                         {
-                            if (!System.Threading.Monitor.Wait(gate, timeoutMs))
+                            if (!Monitor.Wait(gate, timeoutMs))
                                 throw new TimeoutException($"Invocation did not finish within {timeoutMs} ms.");
                         }
                     }

@@ -1,6 +1,6 @@
 # ScriptDebugEngine · MCP 服务器冒烟测试方案
 
-- 状态：**已实现并跑通** —— 离线 L1+L2 共 127 条用例：**114 PASS / 0 FAIL / 13 SKIP**，耗时约 26s；13 条实机/集成用例见 `tools/McpSmokeTests/MANUAL_L3_L4.md`
+- 状态：**已实现并跑通** —— 离线 L1+L2 共 134 条用例：**121 PASS / 0 FAIL / 13 SKIP**，耗时约 26s；13 条实机/集成用例见 `tools/McpSmokeTests/MANUAL_L3_L4.md`
 - 被测对象：`ScriptDebugEngine/Mcp/`（TcpListener 极简 HTTP + 自研 JSON + JSON-RPC 分发 + `invoke_method`）与 `ScriptDebugEngine.cs`（主线程泵、启停、配置）
 - 目标：用一批**极端/畸形/边界**输入，验证服务器在各种"不该崩"的情况下**都还活着**，并且失效时给出**明确英文错误**而不是卡死或崩溃
 - 相关文档：`docs/MCP_DESIGN.md`
@@ -130,7 +130,7 @@ tools/
 
 | ID | 场景 | 期望 | 类型 |
 |---|---|---|---|
-| C-01 | `initialize` 已知版本（2024-11-05/2025-03-26/2025-06-18） | 原样回显该版本 | A |
+| C-01 | `initialize` 已知版本（2025-03-26/2025-06-18） | 原样回显该版本；`2024-11-05`（旧 HTTP+SSE 传输，不声明支持）→ 回退 `2025-03-26` | A |
 | C-02 | `initialize` 未知版本 / 缺 params / params 为空 | 回退 `2025-03-26`，不报错 | A |
 | C-03 | `initialize` 缺 id（通知） | 202 空体 | A |
 | C-04 | `notifications/initialized` | 202 空体 | A |
@@ -150,6 +150,13 @@ tools/
 | C-18 | `Content-Type: text/plain` 带正确 JSON | 正常处理（宽松，记录行为） | A |
 | C-19 | 请求 `GET /health` | 200 + `{"status":"ok","server":...,"version":...}` | A |
 | C-20 | 未知路径 `GET /nope` | 404 | A |
+| C-21 | 无 `Origin` 头（非浏览器 MCP 客户端） | 放行（200） | A |
+| C-22 | 回环 `Origin`（`http://127.0.0.1[:port]` / `https://localhost:8765` / `http://[::1]:8765`） | 放行（200） | A |
+| C-23 | **非回环 `Origin`（DNS rebinding 防护）**：`http://evil.example:8765` / `null` / `file://` / `http://127.0.0.1.evil.com` | **403**（含 `GET /health` 跨源） | A |
+| C-24 | `MCP-Protocol-Version` 受支持版本（2025-03-26 / 2025-06-18）或缺头 | 正常处理（200，缺头按 2025-03-26 兼容） | A |
+| C-25 | **`MCP-Protocol-Version` 不支持/无效版本**（1999-01-01 / 2024-11-05 / 2026-07-28 / garbage） | **400** | A |
+| C-26 | `DELETE /mcp`（本服务器无协议级 session） | 405；未知路径 DELETE → 404 | A |
+| C-27 | POST 携带 JSON-RPC **响应**（带 `result`/`error`、无 `method`） | **400** + `-32600`；两者都没有时仍按"非法请求"回 200 + `-32600` | A |
 
 ### D. 工具参数与安全（dllPath）
 
@@ -287,6 +294,11 @@ tools/
 | P2 | 泛型无参方法会被误命中（`Invoke` 直接抛 `InvalidOperationException`） | 匹配时排除 `ContainsGenericParameters`；候选列表把泛型标成 `Name<>` | E-04 ✔ |
 | P2 | **返回值里的孤立代理对被静默替换成 U+FFFD（改数据）** | `Json.WriteString` 用 `WriteSurrogate`：合法代理对原样输出，孤立代理转义为 `\uXXXX`（与 Newtonsoft 写出行为一致） | J-04/J-05 ✔（修复前 FAIL：wire 上出现 U+FFFD；修复后 wire 上是 `\ud800`/`\udfff`） |
 | **P1（实机才发现）** | **目标函数抛异常时错误文本变成空串** | 实机 Mono 上，从 `Assembly.Load(byte[])` 加载的程序集里抛出的异常其 `ToString()` 返回**空串**（`Message`/`StackTrace` 正常）；改为自己拼「类型: 消息 + InnerException 链 + 堆栈」，并在 `FormatError` 加"空文本兜底"；工具失败也记 error 日志 | 离线 E-06/E-07/E-18 ✔（E-18 用覆盖 `ToString()==""` 的异常确定性复现）；实机 E-06 需重启后复测 |
+| **P0（MCP 规范符合性复核）** | **不校验 `Origin` 头**（规范 MUST）→ DNS rebinding 可绕过"仅回环"边界，恶意网页能驱动 `invoke_method` 执行 DLL | `IsAllowedOrigin`：`Origin` 缺席放行（非浏览器客户端）；出现时主机名必须是 `127.0.0.1` / `localhost` / `::1`，否则回 `403`（`null`、`file://` 一律拒） | C-21/C-22/C-23 ✔（含 `GET /health` 跨源 403） |
+| **P1（MCP 规范符合性复核）** | 不校验 `MCP-Protocol-Version` 头（2025-06-18 起 MUST 对不支持版本回 `400`） | 读取该头，不在支持列表（2025-03-26 / 2025-06-18）内即回 `400` 并列出支持版本；缺头按 2025-03-26 兼容 | C-24/C-25 ✔ |
+| P2（MCP 规范符合性复核） | `DELETE /mcp` 回 `404`（2026-07-28 修订要求 `405`） | 新增 DELETE 分支：`/mcp` → `405`，其余路径仍 `404` | C-26 ✔ |
+| P2（MCP 规范符合性复核） | POST 携带 JSON-RPC **响应**时回 `200 + -32600`（规范要求 HTTP 错误状态） | 无 `method` 但带 `result`/`error` → `400` + `-32600`；两者都没有时保持既有 `200 + -32600` | C-27 ✔ |
+| P2（MCP 规范符合性复核） | 声明支持 `2024-11-05`，但该版本走旧 HTTP+SSE 传输，实际无法握手 | 从 `SupportedProtocolVersions` 移除该版本，协商时回退到 `2025-03-26` | C-01 ✔ |
 
 ### 5.2 未修（已知取舍 / 记录在案）
 
@@ -333,7 +345,9 @@ tools/
 14. 孤立代理在 wire 上是 `\uXXXX` 转义：Node/Python 会原样还原该字符；**C# 的 Newtonsoft 读取时会归一化成 U+FFFD**（这是客户端行为，不是服务端丢数据 —— J-04/J-05 因此断言 wire 形式而不是解析结果）。
 15. **手改 `.cfg` 文件不会运行时生效**（BepInEx 5.4 没有配置文件监视器）；只有 ConfigurationManager 勾选或代码调用 `Config.Reload()` 才会让 `ConfigEntry.Value` 变化、从而触发每帧比对逻辑。另：把服务器 `Enabled=false` 之后，**没有远程手段再打开**（调用通道就在这个服务器上），需 ConfigurationManager 或重启游戏。
 16. **引擎 DLL 在游戏运行期间无法替换**（实测：`user-mapped section open`——BepInEx 把它映射进了进程），改引擎必须"关游戏 → 替换 → 再启动"；脚本 DLL（`scripts` 下）不受影响，可随时覆盖。
-17. `[Mcp] AllowAnyPath=true` 时**不做任何路径校验**：`invoke_method` 可以执行机器上任意位置的 DLL（默认 false）。此时"仅回环绑定"是剩下的唯一边界。
+17. `[Mcp] AllowAnyPath=true` 时**不做任何路径校验**：`invoke_method` 可以执行机器上任意位置的 DLL（默认 false）。此时"仅回环绑定 + Origin 校验"是剩下的边界。
+18. **`Origin` 校验只认回环来源**：浏览器发起的请求必须来自 `127.0.0.1` / `localhost` / `::1`，否则 `403`（规范 MUST 的 DNS rebinding 防护）。非浏览器 MCP 客户端不带 `Origin`，不受影响；但在浏览器里从**非回环页面**（含 `file://`、沙箱 iframe 的 `Origin: null`）调用本服务的用法被明确禁止。
+19. **只声明支持 `2025-03-26` / `2025-06-18`**：客户端若声明别的 `MCP-Protocol-Version` 会收到 `400`（错误文本里列出受支持版本）。规范客户端应使用 `initialize` 协商出的版本，因此不受影响；2026-07-28 修订还要求 `Mcp-Method` / `Mcp-Name` 等镜像头与头-体一致性校验，本服务器**不支持该版本**。
 
 ## 7. 后续可做
 
